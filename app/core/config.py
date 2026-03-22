@@ -1,16 +1,51 @@
+"""
+core/config.py
+──────────────────────────────────────────────────────────────────────────────
+Centralised application settings loaded from environment variables / .env file.
+
+All settings are typed and validated by Pydantic-settings at startup.
+Use `get_settings()` everywhere — it is cached so the .env is read once.
+──────────────────────────────────────────────────────────────────────────────
+"""
+
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    # ── Application ────────────────────────────────────────────────────────
     app_name: str = "Metis Intelligence Backend"
     app_version: str = "0.1.0"
     api_v1_prefix: str = "/api/v1"
+
+    # ── Database ───────────────────────────────────────────────────────────
     database_url: str = Field(..., alias="DATABASE_URL")
+
+    # ── OpenAI / LLM ──────────────────────────────────────────────────────
     openai_api_key: str = Field(..., alias="OPENAI_API_KEY")
-    cors_origins: list[str] = Field(default_factory=lambda: ["*"], alias="CORS_ORIGINS")
+
+    # Which OpenAI chat model to use.
+    # Override with LLM_MODEL=gpt-4o in .env for a more capable model.
+    llm_model: str = Field(default="gpt-4o-mini", alias="LLM_MODEL")
+
+    # When True the service skips the OpenAI call and returns the rich mock
+    # report. Useful for local dev / CI when no API key is available.
+    llm_mock_mode: bool = Field(default=False, alias="LLM_MOCK_MODE")
+
+    # ── CORS ──────────────────────────────────────────────────────────────
+    cors_origins: list[str] = Field(
+        default_factory=lambda: ["*"], alias="CORS_ORIGINS"
+    )
+
+    # ── Logging ───────────────────────────────────────────────────────────
+    log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+
+    @field_validator("log_level", mode="before")
+    @classmethod
+    def normalise_log_level(cls, v: str) -> str:
+        return v.upper()
 
     model_config = SettingsConfigDict(
         env_file=".env",
