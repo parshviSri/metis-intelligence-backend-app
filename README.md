@@ -130,5 +130,3 @@ In short, the application is a conventional FastAPI backend with clear separatio
 - data access: `repositories/`
 - business/LLM logic: `services/`
 - pure helpers: `utils/`
-
-If you want, I can next give you the same explanation as a diagram or walk through one endpoint line by line.
