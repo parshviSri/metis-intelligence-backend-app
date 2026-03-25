@@ -66,13 +66,16 @@ logger = get_logger(__name__)
 PROVIDER_CONFIGS: dict[str, dict[str, Any]] = {
     "openai": {
         "model_tiers": {
-            # GenSpark-proxy supported model names (set OPENAI_BASE_URL in .env):
-            # gpt-5-nano  → lowest cost, fastest
-            # gpt-5-mini  → balanced cost/quality (recommended default)
-            # gpt-5       → highest quality, higher cost
-            "cheap":   "gpt-5-nano",
-            "default": "gpt-5-mini",
-            "premium": "gpt-5",
+            # Official OpenAI models (default — used when OPENAI_BASE_URL is not set):
+            # gpt-4o-mini → lowest cost, fastest
+            # gpt-4o-mini → balanced cost/quality (recommended default)
+            # gpt-4o      → highest quality, higher cost
+            #
+            # If using the GenSpark proxy (OPENAI_BASE_URL set), swap to:
+            # cheap=gpt-5-nano, default=gpt-5-mini, premium=gpt-5
+            "cheap":   "gpt-4o-mini",
+            "default": "gpt-4o-mini",
+            "premium": "gpt-4o",
         },
     },
     # Future providers – uncomment and implement call_llm() branch:

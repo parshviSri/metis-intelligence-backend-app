@@ -33,8 +33,8 @@ class Settings(BaseSettings):
     openai_base_url: str | None = Field(default=None, alias="OPENAI_BASE_URL")
 
     # Which OpenAI chat model to use.
-    # Override with LLM_MODEL=gpt-5-mini in .env for a more capable model.
-    llm_model: str = Field(default="gpt-5-mini", alias="LLM_MODEL")
+    # Override with LLM_MODEL=gpt-4o in .env for higher quality output.
+    llm_model: str = Field(default="gpt-4o-mini", alias="LLM_MODEL")
 
     # When True the service skips the OpenAI call and returns the rich mock
     # report. Useful for local dev / CI when no API key is available.
@@ -49,9 +49,9 @@ class Settings(BaseSettings):
 
     # LLM_MODEL_TIER : Controls which model is selected from the provider's
     #                  model_tiers registry.
-    #                  "cheap"   → gpt-5-nano  (low cost, fastest)
-    #                  "default" → gpt-5-mini  (recommended)
-    #                  "premium" → gpt-5       (highest quality)
+    #                  "cheap"   → gpt-4o-mini  (low cost, fastest)
+    #                  "default" → gpt-4o-mini  (recommended)
+    #                  "premium" → gpt-4o       (highest quality)
     llm_model_tier: str = Field(default="default", alias="LLM_MODEL_TIER")
 
     # LLM_MAX_TOKENS : Hard cap on completion tokens per request.
