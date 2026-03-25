@@ -102,11 +102,10 @@ PROVIDER_CONFIGS: dict[str, dict[str, Any]] = {
 # ─────────────────────────────────────────────────────────────────────────────
 
 PROMPTS: dict[str, str] = {
-    # v1 – Rich, data-aware prompt.  Best quality, higher token use.
-    "v1": """Analyse the following business diagnostic data for {business_name} and return a JSON report.
-
-BUSINESS CONTEXT
-────────────────
+    # v1 – Rich, data-aware prompt with strict consultant persona.
+    # Best quality; use for all standard diagnostic runs.
+    "v1": """BUSINESS DATA
+─────────────
 Business Name    : {business_name}
 Business Type    : {business_type}
 Products         : {products}
@@ -122,47 +121,49 @@ Repeat Purchase Rate       : {rpr:.1f}%
 Conversion Rate            : {conversion_rate:.2f}%
 Active Channels            : {channels}
 
-DERIVED METRICS (for reference)
-────────────────────────────────
+DERIVED METRICS
+───────────────
 Gross Profit ROAS (AOV × margin% / CAC) : {gross_profit_roas:.2f}x
 Estimated LTV (geometric series)        : {ltv_est:,.0f}
 {additional_section}
-OUTPUT FORMAT
-─────────────
-Return ONLY this JSON object (no markdown, no explanation):
+STRICT RULES — read before generating:
+1. Diagnose performance using ONLY the data above.
+2. Do NOT calculate or invent any numbers not provided or derived above.
+3. Do NOT assume missing data.
+4. Do NOT give generic advice (e.g. "improve marketing", "optimise website").
+5. Every recommendation must be specific and immediately executable.
+6. Every insight and recommendation must cite at least one specific number from the data.
+7. If a claim cannot be supported by the data, do not include it.
+8. Identify the highest-leverage problems first.
 
+HEALTH SCORE WEIGHTS: CAC efficiency 30% · Gross margin 25% · Retention 25% · Conversion 20%.
+
+OUTPUT — return ONLY this JSON, no markdown, no explanation:
 {{
   "health_score": <integer 0-100>,
   "insights": [
-    {{"category": "<string>", "text": "<string>"}},
-    ...
+    {{"category": "<string>", "text": "<one concise sentence citing a specific number>"}},
+    ... (exactly 5 insights covering: unit economics, margin, retention, channel mix, conversion)
   ],
   "recommendations": [
-    {{"priority": "high|medium|low", "action": "<string>", "rationale": "<string>"}},
-    ...
+    {{"priority": "high|medium|low", "action": "<specific executable step>", "rationale": "<why, citing data>"}},
+    ... (exactly 4 recommendations, ordered high → low priority; address focus_areas if provided)
   ]
-}}
+}}""",
 
-RULES
-─────
-- health_score: Weight CAC efficiency (30%), margin (25%), retention (25%), conversion (20%).
-- Provide exactly 5-6 insights covering unit economics, margin, retention, channel mix, conversion, and the stated challenge.
-- Provide exactly 4-5 recommendations ordered by priority (high first). If focus_areas are provided, ensure recommendations address them.
-- Every insight and recommendation must reference specific numbers from the data.
-- Be direct, data-driven, and founder-friendly. Avoid generic advice.
-- Return ONLY the JSON object.""",
-
-    # v2 – Compact prompt.  Fewer tokens, slightly less detailed output.
-    # Use when cost is the primary concern (e.g., high-volume batch runs).
+    # v2 – Compact prompt with the same strict consultant persona.
+    # Fewer tokens; use for cost-sensitive or high-volume batch runs.
     "v2": (
-        "You are a business analyst. Analyse this diagnostic data and reply ONLY with a JSON object "
-        "using exactly these keys: "
-        "\"health_score\" (int 0-100, weight CAC 30% margin 25% retention 25% conversion 20%), "
-        "\"insights\" (list of {{\"category\": str, \"text\": str}}, 5 items), "
-        "\"recommendations\" (list of {{\"priority\": \"high|medium|low\", \"action\": str, \"rationale\": str}}, 4 items, "
-        "address focus_areas if present). "
-        "Be concise and data-driven. No markdown.\n\n"
-        "Data (JSON): {compact_data}"
+        "You are a senior D2C growth consultant. "
+        "Diagnose the business using ONLY the provided data. "
+        "Do NOT invent numbers, assume missing data, or give generic advice. "
+        "Every insight and recommendation must cite a specific number from the input. "
+        "Reply ONLY with a JSON object — no markdown, no explanation — with exactly these keys: "
+        "\"health_score\" (int 0-100; weights: CAC efficiency 30%, margin 25%, retention 25%, conversion 20%), "
+        "\"insights\" (list of 5 {{\"category\": str, \"text\": str}} items, each citing a specific metric), "
+        "\"recommendations\" (list of 4 {{\"priority\": \"high|medium|low\", \"action\": str, \"rationale\": str}} items, "
+        "ordered high first, specific and executable, address focus_areas if present).\n\n"
+        "Data: {compact_data}"
     ),
 }
 
@@ -504,8 +505,15 @@ def call_llm(prompt: str, settings: Any | None = None) -> str:
                     {
                         "role": "system",
                         "content": (
-                            "You are a senior business analyst specialising in D2C, SaaS, and "
-                            "services businesses. You always respond with valid JSON only."
+                            "You are a senior D2C growth consultant with expertise in performance "
+                            "marketing, unit economics, and retention strategy. "
+                            "Your job is to: (1) diagnose business performance using ONLY the "
+                            "provided data, (2) identify the highest-leverage problems, "
+                            "(3) recommend specific, actionable interventions. "
+                            "STRICT RULES: do NOT calculate or invent numbers unless explicitly "
+                            "provided, do NOT assume missing data, do NOT generate generic advice. "
+                            "Every recommendation must be specific and executable. "
+                            "OUTPUT MUST BE VALID JSON. NO extra text."
                         ),
                     },
                     {"role": "user", "content": prompt},
