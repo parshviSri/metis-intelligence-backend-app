@@ -36,7 +36,16 @@ settings = get_settings()
 async def lifespan(app: FastAPI):
     # Create all tables that don't already exist.
     # In production prefer running Alembic migrations instead.
-    Base.metadata.create_all(bind=engine)
+    # Wrapped in try/except so the server starts even if DB is temporarily unreachable.
+    try:
+        Base.metadata.create_all(bind=engine)
+        logger.info("Database tables verified/created successfully.")
+    except Exception as exc:
+        logger.warning(
+            "Database unavailable at startup — tables not created: %s. "
+            "Endpoints requiring DB will return 503 until connectivity is restored.",
+            exc,
+        )
     logger.info(
         "Application startup complete — %s v%s",
         settings.app_name,
