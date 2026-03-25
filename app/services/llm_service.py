@@ -66,9 +66,13 @@ logger = get_logger(__name__)
 PROVIDER_CONFIGS: dict[str, dict[str, Any]] = {
     "openai": {
         "model_tiers": {
-            "cheap":   "gpt-4o-mini",
-            "default": "gpt-4o-mini",
-            "premium": "gpt-4o",
+            # GenSpark-proxy supported model names (set OPENAI_BASE_URL in .env):
+            # gpt-5-nano  → lowest cost, fastest
+            # gpt-5-mini  → balanced cost/quality (recommended default)
+            # gpt-5       → highest quality, higher cost
+            "cheap":   "gpt-5-nano",
+            "default": "gpt-5-mini",
+            "premium": "gpt-5",
         },
     },
     # Future providers – uncomment and implement call_llm() branch:
@@ -478,10 +482,18 @@ def call_llm(prompt: str, settings: Any | None = None) -> str:
         if provider == "openai":
             import openai  # noqa: PLC0415
 
-            client = openai.OpenAI(api_key=settings.openai_api_key)
+            # Pass base_url when provided so requests are routed through an
+            # OpenAI-compatible proxy (e.g. GenSpark LLM gateway).
+            # base_url=None lets the SDK use the official OpenAI endpoint.
+            client_kwargs: dict[str, Any] = {"api_key": settings.openai_api_key}
+            if settings.openai_base_url:
+                client_kwargs["base_url"] = settings.openai_base_url
+
+            client = openai.OpenAI(**client_kwargs)
             logger.info(
-                "Calling OpenAI model '%s' (tier=%s max_tokens=%d temp=%.1f)",
+                "Calling OpenAI model '%s' (tier=%s max_tokens=%d temp=%.1f base_url=%s)",
                 model, settings.llm_model_tier, max_tokens, temperature,
+                settings.openai_base_url or "official",
             )
             response = client.chat.completions.create(
                 model=model,
