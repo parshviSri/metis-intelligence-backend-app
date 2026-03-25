@@ -117,9 +117,9 @@ Active Channels            : {channels}
 
 DERIVED METRICS (for reference)
 ────────────────────────────────
-ROAS (AOV × margin / CAC)  : {roas:.2f}x
-Estimated 3-order LTV      : {ltv_est:,.0f}
-
+Gross Profit ROAS (AOV × margin% / CAC) : {gross_profit_roas:.2f}x
+Estimated LTV (geometric series)        : {ltv_est:,.0f}
+{additional_section}
 OUTPUT FORMAT
 ─────────────
 Return ONLY this JSON object (no markdown, no explanation):
@@ -140,7 +140,7 @@ RULES
 ─────
 - health_score: Weight CAC efficiency (30%), margin (25%), retention (25%), conversion (20%).
 - Provide exactly 5-6 insights covering unit economics, margin, retention, channel mix, conversion, and the stated challenge.
-- Provide exactly 4-5 recommendations ordered by priority (high first).
+- Provide exactly 4-5 recommendations ordered by priority (high first). If focus_areas are provided, ensure recommendations address them.
 - Every insight and recommendation must reference specific numbers from the data.
 - Be direct, data-driven, and founder-friendly. Avoid generic advice.
 - Return ONLY the JSON object.""",
@@ -152,7 +152,8 @@ RULES
         "using exactly these keys: "
         "\"health_score\" (int 0-100, weight CAC 30% margin 25% retention 25% conversion 20%), "
         "\"insights\" (list of {{\"category\": str, \"text\": str}}, 5 items), "
-        "\"recommendations\" (list of {{\"priority\": \"high|medium|low\", \"action\": str, \"rationale\": str}}, 4 items). "
+        "\"recommendations\" (list of {{\"priority\": \"high|medium|low\", \"action\": str, \"rationale\": str}}, 4 items, "
+        "address focus_areas if present). "
         "Be concise and data-driven. No markdown.\n\n"
         "Data (JSON): {compact_data}"
     ),
@@ -194,6 +195,123 @@ def _get_model(settings: Any) -> str:
     return tiers.get(tier, tiers["default"])
 
 
+def _derive_metrics(
+    aov: float,
+    margin: float,
+    cac: float,
+    rpr: float,
+) -> tuple[float, float]:
+    """Compute the two derived financial metrics injected into every prompt.
+
+    Both metrics replace the previous approximations with financially correct
+    formulations:
+
+    gross_profit_roas
+        = AOV × (margin / 100) / CAC
+
+        Previously labelled "ROAS" but that is conventionally revenue/spend.
+        Renaming to *Gross Profit ROAS* makes the formula transparent to the
+        LLM and avoids it contradicting the number with its own ROAS estimate.
+
+    ltv_est  (geometric series LTV)
+        = (AOV × margin%) / (1 − retention_rate)
+
+        The previous formula assumed exactly 3 repeat orders for every
+        customer, which overestimates LTV at low RPR and wildly underestimates
+        it at high RPR.  The geometric series is the standard DCF-free LTV
+        model under a constant retention assumption.
+        retention_rate is capped at 0.95 to keep LTV finite.
+
+    Parameters
+    ----------
+    aov    : Average Order Value
+    margin : Gross margin percentage (0–100)
+    cac    : Customer Acquisition Cost
+    rpr    : Repeat Purchase Rate percentage (0–100)
+
+    Returns
+    -------
+    (gross_profit_roas, ltv_est)
+    """
+    gross_profit_roas = (aov * (margin / 100) / cac) if cac > 0 else 0.0
+
+    retention_rate = min(rpr / 100, 0.95)   # cap at 95% — LTV → ∞ otherwise
+    gross_profit_per_order = aov * (margin / 100)
+    if retention_rate > 0:
+        ltv_est = gross_profit_per_order / (1 - retention_rate)
+    else:
+        ltv_est = gross_profit_per_order   # single-purchase customer
+
+    return gross_profit_roas, ltv_est
+
+
+def _build_additional_section(additional: dict[str, Any]) -> str:
+    """Render the optional ADDITIONAL CONTEXT block for v1 prompts.
+
+    Reads the known typed keys from ``additional_inputs`` (after
+    ``normalise_payload`` has serialised the Pydantic model to a plain dict)
+    and formats them as labelled lines.  Any unrecognised keys that survived
+    normalisation are appended as a compact JSON blob so no data is silently
+    dropped.
+
+    Returns an empty string when ``additional`` is empty, so the v1 prompt
+    renders cleanly with no stray blank sections.
+
+    Parameters
+    ----------
+    additional : dict
+        Plain dict produced by ``normalise_payload`` from ``AdditionalInputs``.
+
+    Returns
+    -------
+    str
+        Multi-line section string (including leading newline) or ``""``.
+    """
+    if not additional:
+        return ""
+
+    lines: list[str] = []
+    known_keys: set[str] = set()
+
+    # ── focus_areas ───────────────────────────────────────────────────────
+    if "focus_areas" in additional and additional["focus_areas"]:
+        areas = ", ".join(additional["focus_areas"])
+        lines.append(f"Focus Areas              : {areas}")
+        known_keys.add("focus_areas")
+
+    # ── founder-reported LTV ──────────────────────────────────────────────
+    if "ltv" in additional:
+        ltv_val = safe_float(additional["ltv"])
+        lines.append(f"Founder-Reported LTV     : {ltv_val:,.0f}")
+        known_keys.add("ltv")
+
+    # ── contribution margin ───────────────────────────────────────────────
+    if "contribution_margin" in additional:
+        cm = safe_float(additional["contribution_margin"])
+        lines.append(f"Contribution Margin      : {cm:.1f}%")
+        known_keys.add("contribution_margin")
+
+    # ── monthly revenue ───────────────────────────────────────────────────
+    if "revenue_monthly" in additional:
+        rev = safe_float(additional["revenue_monthly"])
+        lines.append(f"Monthly Revenue          : {rev:,.0f}")
+        known_keys.add("revenue_monthly")
+
+    # ── any remaining unrecognised keys (future-proofing) ─────────────────
+    remaining = {k: v for k, v in additional.items() if k not in known_keys}
+    if remaining:
+        lines.append(
+            f"Other Context            : "
+            f"{json.dumps(remaining, separators=(',', ':'), ensure_ascii=False)}"
+        )
+
+    if not lines:
+        return ""
+
+    body = "\n".join(lines)
+    return f"\nADDITIONAL CONTEXT\n──────────────────\n{body}\n"
+
+
 def _build_prompt(data: dict[str, Any], prompt_version: str) -> str:
     """Render the prompt template for *prompt_version* with the KPI data.
 
@@ -221,6 +339,7 @@ def _build_prompt(data: dict[str, Any], prompt_version: str) -> str:
             f"Available versions: {list(PROMPTS)}"
         )
 
+    # ── Extract raw KPIs ──────────────────────────────────────────────────
     aov             = safe_float(data.get("aov"))
     margin          = safe_float(data.get("margin"))
     cac             = safe_float(data.get("cac"))
@@ -232,35 +351,43 @@ def _build_prompt(data: dict[str, Any], prompt_version: str) -> str:
     business_type   = data.get("business_type", "")
     products        = data.get("products", "")
     challenge       = data.get("biggest_challenge", "")
+    additional      = data.get("additional_inputs") or {}
 
-    # Derived metrics used by v1 and referenced in v2's compact data.
-    roas    = (aov * (margin / 100) / cac) if cac > 0 else 0
-    ltv_est = (aov * rpr / 100) * 3 if rpr > 0 else aov
+    # ── Derived metrics (financially correct formulations) ────────────────
+    gross_profit_roas, ltv_est = _derive_metrics(aov, margin, cac, rpr)
 
     if prompt_version == "v2":
-        # For v2 we serialise everything as compact JSON to minimise tokens.
+        # For v2 serialise everything as compact JSON to minimise tokens.
         compact_data = json.dumps(
             {
-                "business_name": business_name,
-                "business_type": business_type,
-                "products": products,
-                "biggest_challenge": challenge,
-                "aov": aov,
-                "margin_pct": margin,
-                "marketing_spend": marketing_spend,
-                "cac": cac,
+                "business_name":          business_name,
+                "business_type":          business_type,
+                "products":               products,
+                "biggest_challenge":      challenge,
+                "aov":                    aov,
+                "margin_pct":             margin,
+                "marketing_spend":        marketing_spend,
+                "cac":                    cac,
                 "repeat_purchase_rate_pct": rpr,
-                "conversion_rate_pct": conversion_rate,
-                "channels": channels,
-                "roas": round(roas, 2),
-                "ltv_est": round(ltv_est, 0),
+                "conversion_rate_pct":    conversion_rate,
+                "channels":               channels,
+                # Corrected derived metrics
+                "gross_profit_roas":      round(gross_profit_roas, 2),
+                "ltv_est_geometric":      round(ltv_est, 0),
+                # additional_inputs — merged at top level for compact layout
+                **({"focus_areas": additional["focus_areas"]} if additional.get("focus_areas") else {}),
+                **({"founder_ltv": additional["ltv"]} if "ltv" in additional else {}),
+                **({"contribution_margin_pct": additional["contribution_margin"]} if "contribution_margin" in additional else {}),
+                **({"revenue_monthly": additional["revenue_monthly"]} if "revenue_monthly" in additional else {}),
             },
             separators=(",", ":"),
             ensure_ascii=False,
         )
         return template.format(compact_data=compact_data)
 
-    # v1 (and any future rich-format prompts) use named placeholders.
+    # ── v1: rich tabular prompt with optional ADDITIONAL CONTEXT section ───
+    additional_section = _build_additional_section(additional)
+
     return template.format(
         business_name=business_name,
         business_type=business_type,
@@ -273,8 +400,9 @@ def _build_prompt(data: dict[str, Any], prompt_version: str) -> str:
         rpr=rpr,
         conversion_rate=conversion_rate,
         channels=", ".join(channels),
-        roas=roas,
+        gross_profit_roas=gross_profit_roas,
         ltv_est=ltv_est,
+        additional_section=additional_section,
     )
 
 
@@ -515,21 +643,21 @@ def _mock_report(data: dict[str, Any]) -> str:
     business_name    = data.get("business_name", "Your Business")
     challenge        = data.get("biggest_challenge", "scaling efficiently")
 
-    # Derived
-    roas    = (aov * (margin / 100) / cac) if cac > 0 else 0
-    ltv_est = (aov * rpr / 100) * 3 if rpr > 0 else aov
-    score   = calculate_health_score(data)
+    # Derived — use the same corrected formulas as _derive_metrics() so the
+    # mock and live paths are numerically consistent.
+    gross_profit_roas, ltv_est = _derive_metrics(aov, margin, cac, rpr)
+    score = calculate_health_score(data)
 
     # ── Insights ──────────────────────────────────────────────────────────
     insights = [
         {
             "category": "Unit Economics",
             "text": (
-                f"Your AOV of ₹{aov:,.0f} vs. CAC of ₹{cac:,.0f} delivers an estimated "
-                f"ROAS of {roas:.1f}x. "
+                f"Your AOV of ₹{aov:,.0f} vs. CAC of ₹{cac:,.0f} delivers a gross profit ROAS of "
+                f"{gross_profit_roas:.1f}x. "
                 + (
                     "This is healthy — every rupee spent on acquisition returns more than 1.5x in gross profit."
-                    if roas >= 1.5
+                    if gross_profit_roas >= 1.5
                     else "This is below the 1.5x break-even threshold. Review ad creative, targeting, and landing-page alignment."
                 )
             ),
@@ -548,7 +676,8 @@ def _mock_report(data: dict[str, Any]) -> str:
         {
             "category": "Customer Retention",
             "text": (
-                f"A repeat-purchase rate of {rpr:.0f}% translates to an estimated 3-order LTV of ₹{ltv_est:,.0f}. "
+                f"A repeat-purchase rate of {rpr:.0f}% translates to an estimated LTV of ₹{ltv_est:,.0f} "
+                f"(geometric series model). "
                 + (
                     "Strong retention — invest in a loyalty programme to push this above 40%."
                     if rpr >= 30
@@ -591,14 +720,14 @@ def _mock_report(data: dict[str, Any]) -> str:
     # ── Recommendations ────────────────────────────────────────────────────
     recommendations: list[dict[str, str]] = []
 
-    if roas < 1.5:
+    if gross_profit_roas < 1.5:
         recommendations.append({
             "priority": "high",
             "action": "Audit and restructure paid acquisition spend",
             "rationale": (
-                f"With a ROAS of {roas:.1f}x you are likely losing money on new customer acquisition. "
-                f"Pause the bottom 20% of ad sets by ROAS, and reallocate ₹{marketing_spend * 0.20:,.0f} "
-                "to your best-performing creative and audience combination."
+                f"With a gross profit ROAS of {gross_profit_roas:.1f}x you are likely losing money on "
+                f"new customer acquisition. Pause the bottom 20% of ad sets by ROAS, and reallocate "
+                f"₹{marketing_spend * 0.20:,.0f} to your best-performing creative and audience combination."
             ),
         })
 
