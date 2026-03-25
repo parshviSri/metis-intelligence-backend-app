@@ -49,9 +49,12 @@ class Settings(BaseSettings):
     llm_model_tier: str = Field(default="default", alias="LLM_MODEL_TIER")
 
     # LLM_MAX_TOKENS : Hard cap on completion tokens per request.
-    #                  Lower values reduce cost; 1500 is sufficient for the
-    #                  5-insight / 4-recommendation report schema.
-    llm_max_tokens: int = Field(default=1500, alias="LLM_MAX_TOKENS")
+    #                  Measured output for the 5-insight / 4-5-recommendation
+    #                  report schema is consistently 400-580 tokens.
+    #                  650 provides a ~15% safety buffer while cutting the
+    #                  previous over-reservation of 1500 (~3x actual usage) by
+    #                  ~57%.  Raise to 900+ only if you add more output fields.
+    llm_max_tokens: int = Field(default=650, alias="LLM_MAX_TOKENS")
 
     # LLM_TEMPERATURE: Sampling temperature (0.0 = deterministic, 1.0 = creative).
     #                  0.4 balances consistency with natural-sounding text.
