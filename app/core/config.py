@@ -34,6 +34,29 @@ class Settings(BaseSettings):
     # report. Useful for local dev / CI when no API key is available.
     llm_mock_mode: bool = Field(default=False, alias="LLM_MOCK_MODE")
 
+    # ── LLM provider / model-tier / cost controls ──────────────────────────
+    # LLM_PROVIDER   : Which provider to route calls to.
+    #                  "openai" is the only implemented provider.
+    #                  Add "anthropic" or "gemini" by extending PROVIDER_CONFIGS
+    #                  and call_llm() in services/llm_service.py.
+    llm_provider: str = Field(default="openai", alias="LLM_PROVIDER")
+
+    # LLM_MODEL_TIER : Controls which model is selected from the provider's
+    #                  model_tiers registry.
+    #                  "cheap"   → gpt-4o-mini  (low cost, fast)
+    #                  "default" → gpt-4o-mini  (recommended)
+    #                  "premium" → gpt-4o       (highest quality)
+    llm_model_tier: str = Field(default="default", alias="LLM_MODEL_TIER")
+
+    # LLM_MAX_TOKENS : Hard cap on completion tokens per request.
+    #                  Lower values reduce cost; 1500 is sufficient for the
+    #                  5-insight / 4-recommendation report schema.
+    llm_max_tokens: int = Field(default=1500, alias="LLM_MAX_TOKENS")
+
+    # LLM_TEMPERATURE: Sampling temperature (0.0 = deterministic, 1.0 = creative).
+    #                  0.4 balances consistency with natural-sounding text.
+    llm_temperature: float = Field(default=0.4, alias="LLM_TEMPERATURE")
+
     # ── CORS ──────────────────────────────────────────────────────────────
     cors_origins: list[str] = Field(
         default_factory=lambda: ["*"], alias="CORS_ORIGINS"

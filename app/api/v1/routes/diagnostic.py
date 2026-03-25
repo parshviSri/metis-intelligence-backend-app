@@ -30,6 +30,7 @@ import json
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from typing import Literal
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -69,6 +70,14 @@ logger = get_logger(__name__)
 def submit_diagnostic(
     payload: DiagnosticRequest,
     db: Session = Depends(get_db),
+    prompt_version: Literal["v1", "v2"] = Query(
+        default="v1",
+        description=(
+            "Prompt template version to use for report generation. "
+            "'v1' (default) produces a rich, highly data-aware report. "
+            "'v2' uses a compact prompt with lower token cost."
+        ),
+    ),
 ) -> DiagnosticResponse:
     """
     **Main endpoint consumed by the frontend wizard.**
@@ -107,7 +116,7 @@ def submit_diagnostic(
 
     # ── 3. Call LLM service ────────────────────────────────────────────────
     try:
-        llm_raw: str = generate_report(clean_data)
+        llm_raw: str = generate_report(clean_data, prompt_version=prompt_version)
     except Exception as exc:
         logger.exception("LLM service raised an unhandled exception")
         raise HTTPException(
@@ -139,10 +148,11 @@ def submit_diagnostic(
 
     # ── 6. Build and return response ───────────────────────────────────────
     logger.info(
-        "Diagnostic complete — diagnostic_id=%d report_id=%d health_score=%d",
+        "Diagnostic complete — diagnostic_id=%d report_id=%d health_score=%d prompt_version=%s",
         diagnostic.id,
         report.id,
         health_score,
+        prompt_version,
     )
 
     return DiagnosticResponse(

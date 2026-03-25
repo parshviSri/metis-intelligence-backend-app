@@ -5,7 +5,7 @@ LLM service for the Metis Intelligence diagnostic platform.
 
 Public interface
 ────────────────
-  generate_report(data: dict) -> str
+  generate_report(data: dict, prompt_version: str = "v1") -> str
 
 Returns a JSON string with the shape:
   {
@@ -17,17 +17,39 @@ Returns a JSON string with the shape:
 Execution path
 ──────────────
 1. If LLM_MOCK_MODE=true  → deterministic mock (no API call)
-2. If OPENAI_API_KEY set   → real OpenAI call with JSON mode
-3. On any OpenAI error     → log warning, fall back to mock
+2. Otherwise              → call_llm() dispatches to the configured provider
+3. On any LLM error       → log warning, fall back to mock
 
-The mock is data-aware: it derives numbers from the actual submitted KPIs so
-the frontend always renders meaningful content even without an API key.
+Provider / model registry
+─────────────────────────
+• Controlled via environment variables (see Settings in core/config.py):
+    LLM_PROVIDER    – "openai" (default) | future: "anthropic", "gemini"
+    LLM_MODEL_TIER  – "cheap" | "default" (default) | "premium"
+    LLM_MAX_TOKENS  – max completion tokens (default 1500)
+    LLM_TEMPERATURE – sampling temperature (default 0.4)
+• Add a new provider by registering it in PROVIDER_CONFIGS and adding an
+  elif branch in call_llm().
+
+Prompt versioning
+──────────────────
+• PROMPTS dict holds versioned system-prompt templates ("v1", "v2", …).
+• Pass prompt_version="v2" from the route layer to use the lightweight prompt
+  (lower token cost).  Defaults to "v1" (richest, most data-aware prompt).
+• New prompt variants can be added without touching call_llm() or routes.
+
+Cost optimisation
+─────────────────
+• Compact JSON serialisation of KPI data (no whitespace padding).
+• max_tokens cap controlled per-call from settings.
+• Low temperature (0.4) reduces stochastic verbosity.
+• Optional response caching: see TODO below.
 ──────────────────────────────────────────────────────────────────────────────
 """
 
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
 from app.core.logging import get_logger
@@ -37,114 +59,50 @@ logger = get_logger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Public entry-point
+# Provider / model registry
+# Add new providers here; switch with LLM_PROVIDER env-var.
 # ─────────────────────────────────────────────────────────────────────────────
 
-def generate_report(data: dict[str, Any]) -> str:
-    """
-    Generate a structured business diagnostic report.
-
-    Parameters
-    ----------
-    data : dict
-        Validated + normalised request payload (output of DiagnosticRequest.model_dump()).
-
-    Returns
-    -------
-    str
-        JSON-encoded report string.  Always valid JSON.
-    """
-    from app.core.config import get_settings
-
-    settings = get_settings()
-
-    # Mock-mode bypass
-    if settings.llm_mock_mode:
-        logger.info("LLM_MOCK_MODE enabled — returning mock report")
-        return _mock_report(data)
-
-    # Live OpenAI call
-    try:
-        return _openai_report(data, settings)
-    except Exception as exc:
-        logger.warning(
-            "OpenAI call failed — falling back to mock report. Error: %s",
-            exc,
-            exc_info=True,
-        )
-        return _mock_report(data)
+PROVIDER_CONFIGS: dict[str, dict[str, Any]] = {
+    "openai": {
+        "model_tiers": {
+            "cheap":   "gpt-4o-mini",
+            "default": "gpt-4o-mini",
+            "premium": "gpt-4o",
+        },
+    },
+    # Future providers – uncomment and implement call_llm() branch:
+    # "anthropic": {
+    #     "model_tiers": {
+    #         "cheap":   "claude-3-haiku-20240307",
+    #         "default": "claude-3-5-sonnet-20241022",
+    #         "premium": "claude-3-5-sonnet-20241022",
+    #     },
+    # },
+    # "gemini": {
+    #     "model_tiers": {
+    #         "cheap":   "gemini-1.5-flash",
+    #         "default": "gemini-1.5-pro",
+    #         "premium": "gemini-1.5-pro",
+    #     },
+    # },
+}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# OpenAI path
+# Prompt templates
+# Keep as minimal as possible; every extra token costs money at scale.
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _openai_report(data: dict[str, Any], settings: Any) -> str:
-    """Call the OpenAI Chat Completions API with JSON mode."""
-    import openai
-
-    client = openai.OpenAI(api_key=settings.openai_api_key)
-    prompt = _build_prompt(data)
-
-    logger.info("Calling OpenAI model '%s' for diagnostic report", settings.llm_model)
-
-    response = client.chat.completions.create(
-        model=settings.llm_model,
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You are a senior business analyst specialising in D2C, SaaS, and "
-                    "services businesses. You always respond with valid JSON only."
-                ),
-            },
-            {"role": "user", "content": prompt},
-        ],
-        response_format={"type": "json_object"},
-        temperature=0.4,
-        max_tokens=1500,
-    )
-
-    raw = response.choices[0].message.content or ""
-    logger.info("OpenAI response received (%d chars)", len(raw))
-
-    # Validate structure before returning
-    parsed = json.loads(raw)
-    _validate_llm_output(parsed)
-    return raw
-
-
-def _build_prompt(data: dict[str, Any]) -> str:
-    """
-    Construct a focused, structured prompt for the LLM.
-
-    The prompt instructs the model to return a specific JSON schema and
-    provides all relevant KPIs in a clean tabular format.
-    """
-    aov            = safe_float(data.get("aov"))
-    margin         = safe_float(data.get("margin"))
-    cac            = safe_float(data.get("cac"))
-    rpr            = safe_float(data.get("repeat_purchase_rate"))
-    marketing_spend = safe_float(data.get("marketing_spend"))
-    conversion_rate = safe_float(data.get("conversion_rate"))
-    channels        = data.get("channels", [])
-    business_name   = data.get("business_name", "the business")
-    business_type   = data.get("business_type", "")
-    products        = data.get("products", "")
-    challenge       = data.get("biggest_challenge", "")
-
-    # Derived metrics for context
-    roas = (aov * (margin / 100) / cac) if cac > 0 else 0
-    ltv_est = (aov * rpr / 100) * 3 if rpr > 0 else aov
-
-    return f"""
-Analyse the following business diagnostic data for {business_name} and return a JSON report.
+PROMPTS: dict[str, str] = {
+    # v1 – Rich, data-aware prompt.  Best quality, higher token use.
+    "v1": """Analyse the following business diagnostic data for {business_name} and return a JSON report.
 
 BUSINESS CONTEXT
 ────────────────
-Business Name  : {business_name}
-Business Type  : {business_type}
-Products       : {products}
+Business Name    : {business_name}
+Business Type    : {business_type}
+Products         : {products}
 Primary Challenge: {challenge}
 
 KEY METRICS
@@ -155,7 +113,7 @@ Monthly Marketing Spend    : {marketing_spend:,.0f}
 Customer Acquisition Cost  : {cac:,.0f}
 Repeat Purchase Rate       : {rpr:.1f}%
 Conversion Rate            : {conversion_rate:.2f}%
-Active Channels            : {", ".join(channels)}
+Active Channels            : {channels}
 
 DERIVED METRICS (for reference)
 ────────────────────────────────
@@ -180,17 +138,160 @@ Return ONLY this JSON object (no markdown, no explanation):
 
 RULES
 ─────
-- health_score: 0 = business in crisis, 100 = exceptional. Weight CAC efficiency (30%), margin (25%), retention (25%), conversion (20%).
-- Provide exactly 5-6 insights covering: unit economics, margin, retention, channel mix, conversion, and the stated challenge.
+- health_score: Weight CAC efficiency (30%), margin (25%), retention (25%), conversion (20%).
+- Provide exactly 5-6 insights covering unit economics, margin, retention, channel mix, conversion, and the stated challenge.
 - Provide exactly 4-5 recommendations ordered by priority (high first).
-- Every insight and recommendation must reference specific numbers from the data above.
+- Every insight and recommendation must reference specific numbers from the data.
 - Be direct, data-driven, and founder-friendly. Avoid generic advice.
-- Return ONLY the JSON object.
-"""
+- Return ONLY the JSON object.""",
+
+    # v2 – Compact prompt.  Fewer tokens, slightly less detailed output.
+    # Use when cost is the primary concern (e.g., high-volume batch runs).
+    "v2": (
+        "You are a business analyst. Analyse this diagnostic data and reply ONLY with a JSON object "
+        "using exactly these keys: "
+        "\"health_score\" (int 0-100, weight CAC 30% margin 25% retention 25% conversion 20%), "
+        "\"insights\" (list of {{\"category\": str, \"text\": str}}, 5 items), "
+        "\"recommendations\" (list of {{\"priority\": \"high|medium|low\", \"action\": str, \"rationale\": str}}, 4 items). "
+        "Be concise and data-driven. No markdown.\n\n"
+        "Data (JSON): {compact_data}"
+    ),
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Internal helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _get_model(settings: Any) -> str:
+    """Resolve the model name from the provider registry and the active tier.
+
+    Parameters
+    ----------
+    settings : Settings
+        Application settings loaded from environment variables.
+
+    Returns
+    -------
+    str
+        Model identifier to pass to the LLM API.
+
+    Raises
+    ------
+    ValueError
+        If the configured LLM_PROVIDER is not registered in PROVIDER_CONFIGS.
+    """
+    provider = settings.llm_provider
+    provider_cfg = PROVIDER_CONFIGS.get(provider)
+    if provider_cfg is None:
+        raise ValueError(
+            f"Unknown LLM_PROVIDER '{provider}'. "
+            f"Registered providers: {list(PROVIDER_CONFIGS)}"
+        )
+    tiers = provider_cfg["model_tiers"]
+    tier  = settings.llm_model_tier
+    # Fall back to "default" tier if an unrecognised tier is requested.
+    return tiers.get(tier, tiers["default"])
+
+
+def _build_prompt(data: dict[str, Any], prompt_version: str) -> str:
+    """Render the prompt template for *prompt_version* with the KPI data.
+
+    Parameters
+    ----------
+    data :
+        Validated + normalised request payload dict.
+    prompt_version :
+        Key into :data:`PROMPTS` (e.g. ``"v1"``, ``"v2"``).
+
+    Returns
+    -------
+    str
+        Fully rendered prompt string ready to send to the LLM.
+
+    Raises
+    ------
+    ValueError
+        When *prompt_version* is not a registered key in :data:`PROMPTS`.
+    """
+    template = PROMPTS.get(prompt_version)
+    if template is None:
+        raise ValueError(
+            f"Unknown prompt_version '{prompt_version}'. "
+            f"Available versions: {list(PROMPTS)}"
+        )
+
+    aov             = safe_float(data.get("aov"))
+    margin          = safe_float(data.get("margin"))
+    cac             = safe_float(data.get("cac"))
+    rpr             = safe_float(data.get("repeat_purchase_rate"))
+    marketing_spend = safe_float(data.get("marketing_spend"))
+    conversion_rate = safe_float(data.get("conversion_rate"))
+    channels        = data.get("channels", [])
+    business_name   = data.get("business_name", "the business")
+    business_type   = data.get("business_type", "")
+    products        = data.get("products", "")
+    challenge       = data.get("biggest_challenge", "")
+
+    # Derived metrics used by v1 and referenced in v2's compact data.
+    roas    = (aov * (margin / 100) / cac) if cac > 0 else 0
+    ltv_est = (aov * rpr / 100) * 3 if rpr > 0 else aov
+
+    if prompt_version == "v2":
+        # For v2 we serialise everything as compact JSON to minimise tokens.
+        compact_data = json.dumps(
+            {
+                "business_name": business_name,
+                "business_type": business_type,
+                "products": products,
+                "biggest_challenge": challenge,
+                "aov": aov,
+                "margin_pct": margin,
+                "marketing_spend": marketing_spend,
+                "cac": cac,
+                "repeat_purchase_rate_pct": rpr,
+                "conversion_rate_pct": conversion_rate,
+                "channels": channels,
+                "roas": round(roas, 2),
+                "ltv_est": round(ltv_est, 0),
+            },
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        return template.format(compact_data=compact_data)
+
+    # v1 (and any future rich-format prompts) use named placeholders.
+    return template.format(
+        business_name=business_name,
+        business_type=business_type,
+        products=products,
+        challenge=challenge,
+        aov=aov,
+        margin=margin,
+        marketing_spend=marketing_spend,
+        cac=cac,
+        rpr=rpr,
+        conversion_rate=conversion_rate,
+        channels=", ".join(channels),
+        roas=roas,
+        ltv_est=ltv_est,
+    )
 
 
 def _validate_llm_output(parsed: dict) -> None:
-    """Raise ValueError if the LLM response is missing required keys."""
+    """Raise ValueError if the LLM response is missing required top-level keys.
+
+    Parameters
+    ----------
+    parsed : dict
+        JSON-decoded LLM response.
+
+    Raises
+    ------
+    ValueError
+        If any of ``health_score``, ``insights``, or ``recommendations`` are
+        absent or of the wrong type.
+    """
     if "health_score" not in parsed:
         raise ValueError("LLM response missing 'health_score'")
     if "insights" not in parsed or not isinstance(parsed["insights"], list):
@@ -200,16 +301,209 @@ def _validate_llm_output(parsed: dict) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# LLM call layer
+# ─────────────────────────────────────────────────────────────────────────────
+
+def call_llm(prompt: str, settings: Any | None = None) -> str:
+    """Send *prompt* to the configured LLM provider and return raw text.
+
+    Design goals
+    ────────────
+    • Provider-agnostic: the caller never imports a provider SDK directly.
+    • Retries once on transient failure with a 2-second back-off before
+      re-raising so upstream callers can decide on fallback strategy.
+    • ``max_tokens`` and ``temperature`` are driven by Settings, not hard-coded,
+      so they can be tuned without code changes.
+
+    Parameters
+    ----------
+    prompt :
+        Fully rendered prompt string to send to the model.
+    settings :
+        Application settings.  Loaded automatically if not supplied (useful
+        for unit tests that patch ``get_settings``).
+
+    Returns
+    -------
+    str
+        Raw text content from the LLM response (never None; empty string on
+        empty response).
+
+    Raises
+    ------
+    Exception
+        Re-raised if the API call fails on both the initial attempt and the
+        single retry.
+    NotImplementedError
+        If the configured LLM_PROVIDER has no implementation branch below.
+    """
+    if settings is None:
+        from app.core.config import get_settings  # noqa: PLC0415
+        settings = get_settings()
+
+    model       = _get_model(settings)
+    max_tokens  = settings.llm_max_tokens
+    temperature = settings.llm_temperature
+    provider    = settings.llm_provider
+
+    def _attempt() -> str:
+        if provider == "openai":
+            import openai  # noqa: PLC0415
+
+            client = openai.OpenAI(api_key=settings.openai_api_key)
+            logger.info(
+                "Calling OpenAI model '%s' (tier=%s max_tokens=%d temp=%.1f)",
+                model, settings.llm_model_tier, max_tokens, temperature,
+            )
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a senior business analyst specialising in D2C, SaaS, and "
+                            "services businesses. You always respond with valid JSON only."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                response_format={"type": "json_object"},
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            raw = response.choices[0].message.content or ""
+            logger.info("OpenAI response received (%d chars)", len(raw))
+            return raw
+
+        # ── Future providers ──────────────────────────────────────────────
+        # elif provider == "anthropic":
+        #     import anthropic
+        #     client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        #     message = client.messages.create(
+        #         model=model, max_tokens=max_tokens,
+        #         messages=[{"role": "user", "content": prompt}],
+        #     )
+        #     return message.content[0].text
+
+        raise NotImplementedError(
+            f"LLM provider '{provider}' is registered in PROVIDER_CONFIGS but "
+            "has no implementation branch in call_llm(). Add an elif block."
+        )
+
+    try:
+        return _attempt()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "LLM call failed (%s). Retrying once in 2 s …", exc, exc_info=True
+        )
+        time.sleep(2)
+        return _attempt()  # Second failure propagates to the caller.
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Public entry-point
+# ─────────────────────────────────────────────────────────────────────────────
+
+def generate_report(data: dict[str, Any], prompt_version: str = "v1") -> str:
+    """Generate a structured business diagnostic report.
+
+    Execution path
+    ──────────────
+    1. If ``LLM_MOCK_MODE=true`` → return a rich, data-aware mock (no API call).
+    2. Otherwise → build the prompt, call the LLM, validate the response.
+    3. On any LLM error → log a warning and fall back to the mock.
+
+    Parameters
+    ----------
+    data :
+        Validated + normalised request payload (output of
+        ``DiagnosticRequest.model_dump()`` passed through ``normalise_payload``).
+    prompt_version :
+        Which prompt template to use.  ``"v1"`` (default) is the richest and
+        most data-aware.  ``"v2"`` is a compact, token-efficient variant.
+        Pass ``prompt_version`` from the route layer to allow per-request
+        control without changing the service signature.
+
+    Returns
+    -------
+    str
+        JSON-encoded report string.  Always valid JSON.
+
+    Example
+    -------
+    >>> report_json = generate_report(payload, prompt_version="v2")
+    >>> report = json.loads(report_json)
+    >>> report["health_score"]
+    72
+    """
+    # TODO: cache based on input hash
+    # import hashlib
+    # cache_key = hashlib.sha256(
+    #     json.dumps(data, sort_keys=True).encode()
+    # ).hexdigest()
+    # if cached := _cache.get(cache_key):
+    #     logger.info("Cache hit for diagnostic (key=%s)", cache_key[:8])
+    #     return cached
+
+    from app.core.config import get_settings  # noqa: PLC0415
+
+    settings = get_settings()
+
+    # ── Mock-mode bypass ──────────────────────────────────────────────────
+    if settings.llm_mock_mode:
+        logger.info("LLM_MOCK_MODE enabled — returning mock report")
+        return _mock_report(data)
+
+    # ── Live LLM call ─────────────────────────────────────────────────────
+    try:
+        prompt = _build_prompt(data, prompt_version)
+        raw    = call_llm(prompt, settings)
+
+        parsed = json.loads(raw)
+        _validate_llm_output(parsed)
+
+        logger.info(
+            "Report generated via LLM (provider=%s tier=%s prompt=%s "
+            "health_score=%s insights=%d recs=%d)",
+            settings.llm_provider,
+            settings.llm_model_tier,
+            prompt_version,
+            parsed.get("health_score"),
+            len(parsed.get("insights", [])),
+            len(parsed.get("recommendations", [])),
+        )
+        return raw
+
+    except Exception as exc:
+        logger.warning(
+            "LLM path failed — falling back to mock report. Error: %s",
+            exc,
+            exc_info=True,
+        )
+        return _mock_report(data)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Rich mock report  (data-aware, deterministic)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _mock_report(data: dict[str, Any]) -> str:
-    """
-    Build a realistic mock report driven by the actual submitted KPIs.
+    """Build a realistic mock report driven by the actual submitted KPIs.
 
-    No API call is made.  The score is computed by utils.calculate_health_score().
-    Insights and recommendations are templated from the real numbers so the
-    frontend renders meaningful content during local development / CI.
+    No API call is made.  The score is computed by
+    :func:`utils.calculate_health_score`.  Insights and recommendations are
+    templated from the real numbers so the frontend renders meaningful content
+    during local development / CI.
+
+    Parameters
+    ----------
+    data : dict
+        Normalised diagnostic payload.
+
+    Returns
+    -------
+    str
+        JSON-encoded mock report string (same schema as the live LLM report).
     """
     aov              = safe_float(data.get("aov"))
     margin           = safe_float(data.get("margin"))
@@ -222,9 +516,9 @@ def _mock_report(data: dict[str, Any]) -> str:
     challenge        = data.get("biggest_challenge", "scaling efficiently")
 
     # Derived
-    roas     = (aov * (margin / 100) / cac) if cac > 0 else 0
-    ltv_est  = (aov * rpr / 100) * 3 if rpr > 0 else aov
-    score    = calculate_health_score(data)
+    roas    = (aov * (margin / 100) / cac) if cac > 0 else 0
+    ltv_est = (aov * rpr / 100) * 3 if rpr > 0 else aov
+    score   = calculate_health_score(data)
 
     # ── Insights ──────────────────────────────────────────────────────────
     insights = [
@@ -295,7 +589,7 @@ def _mock_report(data: dict[str, Any]) -> str:
     ]
 
     # ── Recommendations ────────────────────────────────────────────────────
-    recommendations = []
+    recommendations: list[dict[str, str]] = []
 
     if roas < 1.5:
         recommendations.append({
