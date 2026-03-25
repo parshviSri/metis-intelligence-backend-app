@@ -20,7 +20,58 @@ from __future__ import annotations
 
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Additional inputs sub-model
+# ─────────────────────────────────────────────────────────────────────────────
+
+class AdditionalInputs(BaseModel):
+    """
+    Optional, well-typed extra context forwarded to the LLM alongside the
+    core KPIs.  All fields are optional; unknown keys sent by the frontend
+    are silently dropped (extra='ignore') so old and future clients never
+    break.
+
+    Why a typed model instead of dict[str, Any]
+    ───────────────────────────────────────────
+    • Prevents unbounded payload size / injection via rogue keys.
+    • Makes the contract explicit to frontend developers.
+    • Allows _build_prompt() to safely read typed values with no
+      defensive casting.
+    • extra='ignore' means unknown keys are accepted but discarded,
+      preserving forward-compatibility.
+    """
+
+    focus_areas: list[str] = Field(
+        default_factory=list,
+        description="Business areas to prioritise, e.g. ['acquisition', 'retention']",
+    )
+    ltv: Optional[float] = Field(
+        default=None, ge=0,
+        description="Founder-reported Lifetime Value (currency units)",
+    )
+    contribution_margin: Optional[float] = Field(
+        default=None, ge=0, le=100,
+        description="Contribution margin % (0–100), if different from gross margin",
+    )
+    revenue_monthly: Optional[float] = Field(
+        default=None, ge=0,
+        description="Monthly revenue (currency units) for absolute-scale context",
+    )
+
+    @field_validator("focus_areas", mode="before")
+    @classmethod
+    def coerce_focus_areas(cls, v: Any) -> list[str]:
+        """Accept a JSON array or a comma-separated string."""
+        if isinstance(v, list):
+            return [str(item).strip() for item in v if str(item).strip()][:10]
+        if isinstance(v, str):
+            return [item.strip() for item in v.split(",") if item.strip()][:10]
+        return []
+
+    model_config = ConfigDict(extra="ignore")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -122,10 +173,13 @@ class DiagnosticRequest(BaseModel):
         description="Free-text description of the primary growth obstacle"
     )
 
-    # ── Catch-all for optional / future fields ────────────────────────────
-    additional_inputs: Optional[dict[str, Any]] = Field(
-        default_factory=dict,
-        description="Any extra fields sent by the frontend (focus areas, LTV, etc.)"
+    # ── Optional extra context forwarded to the LLM ─────────────────────
+    additional_inputs: AdditionalInputs = Field(
+        default_factory=AdditionalInputs,
+        description=(
+            "Optional typed context forwarded to the LLM: focus_areas, ltv, "
+            "contribution_margin, revenue_monthly. Unknown keys are silently dropped."
+        ),
     )
 
     # ── Validators ────────────────────────────────────────────────────────
@@ -153,6 +207,20 @@ class DiagnosticRequest(BaseModel):
             return v.strip()
         return v
 
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_additional_inputs(cls, values: Any) -> Any:
+        """
+        If the frontend sends additional_inputs as a plain dict (legacy clients),
+        pass it straight through — Pydantic will coerce it into AdditionalInputs.
+        If it is missing or None, substitute an empty dict so AdditionalInputs
+        can apply its own defaults.
+        """
+        if isinstance(values, dict):
+            if values.get("additional_inputs") is None:
+                values["additional_inputs"] = {}
+        return values
+
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
@@ -171,6 +239,7 @@ class DiagnosticRequest(BaseModel):
                     "focus_areas": ["acquisition", "retention"],
                     "ltv": 3800,
                     "contribution_margin": 38,
+                    "revenue_monthly": 450000,
                 },
             }
         }

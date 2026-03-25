@@ -79,8 +79,19 @@ def normalise_payload(data: dict[str, Any]) -> dict[str, Any]:
     else:
         clean["channels"] = []
 
-    # Catch-all
-    clean["additional_inputs"] = data.get("additional_inputs") or {}
+    # additional_inputs — may arrive as an AdditionalInputs Pydantic model
+    # (when called from the route after model_dump()) or as a plain dict
+    # (when called from tests / scripts directly).  Either way we normalise
+    # to a plain dict so downstream code stays provider-agnostic.
+    raw_additional = data.get("additional_inputs") or {}
+    if hasattr(raw_additional, "model_dump"):
+        # It's a Pydantic model instance — serialise to dict, drop None values
+        # so _build_prompt() can check `if "ltv" in additional` cleanly.
+        clean["additional_inputs"] = {
+            k: v for k, v in raw_additional.model_dump().items() if v is not None and v != []
+        }
+    else:
+        clean["additional_inputs"] = raw_additional if isinstance(raw_additional, dict) else {}
 
     return clean
 
