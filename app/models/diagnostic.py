@@ -60,6 +60,7 @@ class DiagnosticReport(Base):
     report_id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     user_id: Mapped[Optional[int]] = mapped_column(ForeignKey("users.user_id", ondelete="SET NULL"), nullable=True, index=True)
     business_id: Mapped[int] = mapped_column(ForeignKey("business.business_id", ondelete="CASCADE"), nullable=False, index=True)
+    analysis_type: Mapped[str] = mapped_column(String(50), nullable=False, default="full_diagnostic")
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="completed")
     message: Mapped[str] = mapped_column(Text, nullable=False, default="Diagnostic submitted successfully.")
     health_score: Mapped[Optional[int]] = mapped_column(SmallInteger, nullable=True)

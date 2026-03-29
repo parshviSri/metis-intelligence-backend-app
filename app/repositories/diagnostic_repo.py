@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 from sqlalchemy.orm import Session, selectinload
 
@@ -17,6 +17,7 @@ from app.models.diagnostic import (
     RetentionLifecycle,
     User,
 )
+from app.schemas.diagnostic_schema import AnalysisType
 
 logger = get_logger(__name__)
 
@@ -52,6 +53,14 @@ REPORT_RELATIONSHIPS = (
 )
 
 
+def find_user(db: Session, *, user_id: int | None = None, email: str | None = None) -> Optional[User]:
+    if user_id is not None:
+        return db.get(User, user_id)
+    if email:
+        return db.query(User).filter(User.email == email).first()
+    return None
+
+
 def get_or_create_user(
     db: Session,
     *,
@@ -73,6 +82,16 @@ def get_or_create_user(
     db.flush()
     logger.info("Created User user_id=%d email=%s", user.user_id, email)
     return user
+
+
+def get_user_analysis_types(db: Session, user_id: int) -> list[AnalysisType]:
+    rows = (
+        db.query(DiagnosticReport.analysis_type)
+        .filter(DiagnosticReport.user_id == user_id)
+        .distinct()
+        .all()
+    )
+    return [cast(AnalysisType, row[0]) for row in rows if row[0]]
 
 
 def create_business(db: Session, raw_input: dict[str, Any], user: User | None) -> Business:
@@ -106,6 +125,7 @@ def create_report_bundle(
     health_score: int,
     insights: list[dict[str, Any]],
     recommendations: list[dict[str, Any]],
+    analysis_type: AnalysisType,
     status: str = "completed",
     message: str = "Diagnostic submitted successfully.",
 ) -> DiagnosticReport:
@@ -114,6 +134,7 @@ def create_report_bundle(
     report = DiagnosticReport(
         user_id=user.user_id if user else None,
         business_id=business.business_id,
+        analysis_type=analysis_type,
         status=status,
         message=message,
         health_score=health_score,
@@ -237,10 +258,11 @@ def create_report_bundle(
     db.commit()
     db.refresh(report)
     logger.info(
-        "Created DiagnosticReport report_id=%d business_id=%d health_score=%s",
+        "Created DiagnosticReport report_id=%d business_id=%d health_score=%s analysis_type=%s",
         report.report_id,
         business.business_id,
         health_score,
+        analysis_type,
     )
     return report
 

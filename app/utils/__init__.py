@@ -30,6 +30,7 @@ def normalise_payload(data: dict[str, Any]) -> dict[str, Any]:
 
     clean["user_id"] = safe_int(data.get("user_id"), default=None)
     clean["email"] = str(data.get("email", "")).strip() or None
+    clean["analysis_type"] = str(data.get("analysis_type", "full_diagnostic")).strip() or "full_diagnostic"
 
     for key in ("business_name", "business_type", "products", "biggest_challenge"):
         raw = data.get(key, "")

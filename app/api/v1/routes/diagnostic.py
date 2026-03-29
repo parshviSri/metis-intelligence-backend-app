@@ -11,12 +11,16 @@ from app.core.logging import get_logger
 from app.repositories.diagnostic_repo import (
     create_business,
     create_report_bundle,
+    find_user,
     get_business_by_id,
     get_or_create_user,
     get_report_by_business_id,
+    get_user_analysis_types,
     list_businesses,
 )
 from app.schemas.diagnostic_schema import (
+    AnalysisAccessRequest,
+    AnalysisAccessResponse,
     DiagnosticRequest,
     DiagnosticResponse,
     DiagnosticSummary,
@@ -31,6 +35,52 @@ logger = get_logger(__name__)
 
 
 @router.post(
+    "/analysis-access",
+    response_model=AnalysisAccessResponse,
+    summary="Check whether a user can access an analysis for free or must pay",
+)
+def check_analysis_access(
+    payload: AnalysisAccessRequest,
+    db: Session = Depends(get_db),
+) -> AnalysisAccessResponse:
+    user = find_user(db=db, user_id=payload.user_id, email=payload.email)
+    if user is None:
+        return AnalysisAccessResponse(
+            user_exists=False,
+            user_id=None,
+            selected_analysis_type=payload.analysis_type,
+            previous_analysis_types=[],
+            is_first_analysis=True,
+            has_used_selected_analysis=False,
+            requires_payment=False,
+            message="First analysis for this user. Allow free access.",
+        )
+
+    previous_analysis_types = get_user_analysis_types(db=db, user_id=user.user_id)
+    has_used_selected_analysis = payload.analysis_type in previous_analysis_types
+    is_first_analysis = len(previous_analysis_types) == 0
+    requires_payment = not is_first_analysis and not has_used_selected_analysis
+
+    if is_first_analysis:
+        message = "First analysis for this user. Allow free access."
+    elif has_used_selected_analysis:
+        message = "User has already used this analysis type. No extra payment required for the same analysis type."
+    else:
+        message = "User has already used a different analysis type. Payment is required for a new analysis type."
+
+    return AnalysisAccessResponse(
+        user_exists=True,
+        user_id=user.user_id,
+        selected_analysis_type=payload.analysis_type,
+        previous_analysis_types=previous_analysis_types,
+        is_first_analysis=is_first_analysis,
+        has_used_selected_analysis=has_used_selected_analysis,
+        requires_payment=requires_payment,
+        message=message,
+    )
+
+
+@router.post(
     "/submit",
     response_model=DiagnosticResponse,
     status_code=status.HTTP_201_CREATED,
@@ -42,10 +92,11 @@ def submit_diagnostic(
     prompt_version: Literal["v1", "v2"] = Query(default="v1"),
 ) -> DiagnosticResponse:
     logger.info(
-        "Diagnostic submission received for business='%s' type='%s' user_email='%s'",
+        "Diagnostic submission received for business='%s' type='%s' user_email='%s' analysis_type='%s'",
         payload.business_name,
         payload.business_type,
         payload.email,
+        payload.analysis_type,
     )
 
     clean_data = normalise_payload(payload.model_dump())
@@ -89,6 +140,7 @@ def submit_diagnostic(
             health_score=health_score,
             insights=insights,
             recommendations=recommendations,
+            analysis_type=payload.analysis_type,
             status="completed",
             message="Diagnostic submitted successfully.",
         )
@@ -105,6 +157,7 @@ def submit_diagnostic(
         report_id=report.report_id,
         business_id=business.business_id,
         user_id=user.user_id if user else None,
+        analysis_type=payload.analysis_type,
         status=report.status,
         message=report.message,
         health_score=health_score,
@@ -142,6 +195,7 @@ def get_diagnostic(
         report_id=report.report_id,
         business_id=business.business_id,
         user_id=business.user_id,
+        analysis_type=report.analysis_type,
         status=report.status,
         message=report.message,
         health_score=report.health_score or 0,
@@ -174,6 +228,7 @@ def list_all_diagnostics(
                 report_id=report.report_id if report else None,
                 business_id=business.business_id,
                 user_id=business.user_id,
+                analysis_type=report.analysis_type if report else "full_diagnostic",
                 business_name=business.business_name,
                 business_type=business.business_type,
                 health_score=report.health_score if report else None,
