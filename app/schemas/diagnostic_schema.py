@@ -1,70 +1,32 @@
-"""
-schemas/diagnostic_schema.py
-──────────────────────────────────────────────────────────────────────────────
-All Pydantic I/O models for the diagnostic endpoint.
-
-Request  → DiagnosticRequest
-Response → DiagnosticResponse  (contains Insight + Recommendation lists)
-
-Design rules
-────────────
-• Every field matches exactly what the frontend sends (services/diagnosticService.js
-  normalisePayload).
-• Numeric fields are strictly typed as float with sensible range validators.
-• channels accepts both a list and a comma-separated string (field_validator).
-• additional_inputs is a free-form catch-all dict for optional / future fields.
-──────────────────────────────────────────────────────────────────────────────
-"""
-
 from __future__ import annotations
 
+from datetime import date
 from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Additional inputs sub-model
-# ─────────────────────────────────────────────────────────────────────────────
-
 class AdditionalInputs(BaseModel):
-    """
-    Optional, well-typed extra context forwarded to the LLM alongside the
-    core KPIs.  All fields are optional; unknown keys sent by the frontend
-    are silently dropped (extra='ignore') so old and future clients never
-    break.
-
-    Why a typed model instead of dict[str, Any]
-    ───────────────────────────────────────────
-    • Prevents unbounded payload size / injection via rogue keys.
-    • Makes the contract explicit to frontend developers.
-    • Allows _build_prompt() to safely read typed values with no
-      defensive casting.
-    • extra='ignore' means unknown keys are accepted but discarded,
-      preserving forward-compatibility.
-    """
-
-    focus_areas: list[str] = Field(
-        default_factory=list,
-        description="Business areas to prioritise, e.g. ['acquisition', 'retention']",
-    )
-    ltv: Optional[float] = Field(
-        default=None, ge=0,
-        description="Founder-reported Lifetime Value (currency units)",
-    )
-    contribution_margin: Optional[float] = Field(
-        default=None, ge=0, le=100,
-        description="Contribution margin % (0–100), if different from gross margin",
-    )
-    revenue_monthly: Optional[float] = Field(
-        default=None, ge=0,
-        description="Monthly revenue (currency units) for absolute-scale context",
-    )
+    focus_areas: list[str] = Field(default_factory=list)
+    ltv: Optional[float] = Field(default=None, ge=0)
+    contribution_margin: Optional[float] = Field(default=None, ge=0, le=100)
+    revenue_monthly: Optional[float] = Field(default=None, ge=0)
+    revenue: Optional[float] = Field(default=None, ge=0)
+    orders: Optional[int] = Field(default=None, ge=0)
+    customers: Optional[int] = Field(default=None, ge=0)
+    snapshot_date: Optional[date] = None
+    product_profitability: Optional[dict[str, Any]] = None
+    revenue_breakdown: Optional[dict[str, Any]] = None
+    cac_by_channel: Optional[dict[str, Any]] = None
+    time_between_purchases: Optional[float] = Field(default=None, ge=0)
+    cohort_tracking: Optional[dict[str, Any]] = None
+    experiments: Optional[dict[str, Any]] = None
+    funnel_metrics: Optional[dict[str, Any]] = None
+    drop_off_rates: Optional[dict[str, Any]] = None
 
     @field_validator("focus_areas", mode="before")
     @classmethod
     def coerce_focus_areas(cls, v: Any) -> list[str]:
-        """Accept a JSON array or a comma-separated string."""
         if isinstance(v, list):
             return [str(item).strip() for item in v if str(item).strip()][:10]
         if isinstance(v, str):
@@ -74,120 +36,36 @@ class AdditionalInputs(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Sub-models used inside DiagnosticResponse
-# ─────────────────────────────────────────────────────────────────────────────
-
 class Insight(BaseModel):
-    """A single business insight returned by the LLM."""
-
-    category: str = Field(..., description="Short label, e.g. 'Unit Economics'")
-    text: str = Field(..., description="Human-readable insight body")
+    category: str
+    text: str
 
 
 class Recommendation(BaseModel):
-    """A single prioritised, actionable recommendation returned by the LLM."""
+    priority: Literal["high", "medium", "low"]
+    action: str
+    rationale: str
 
-    priority: Literal["high", "medium", "low"] = Field(
-        ..., description="Urgency level"
-    )
-    action: str = Field(..., description="Short imperative action title")
-    rationale: str = Field(..., description="Data-driven explanation")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Request
-# ─────────────────────────────────────────────────────────────────────────────
 
 class DiagnosticRequest(BaseModel):
-    """
-    Payload sent by the frontend wizard.
-
-    Field mapping (camelCase frontend → snake_case API)
-    ────────────────────────────────────────────────────
-    businessName          → business_name
-    businessType          → business_type
-    products              → products
-    aov                   → aov
-    grossMargin           → margin
-    monthlyMarketingSpend → marketing_spend
-    cac                   → cac
-    repeatPurchaseRate    → repeat_purchase_rate
-    channels              → channels
-    conversionRate        → conversion_rate
-    biggestChallenge      → biggest_challenge
-    (rest)                → additional_inputs
-    """
-
-    # ── Step 1 – Business Basics ──────────────────────────────────────────
-    business_name: str = Field(
-        ..., min_length=1, max_length=255,
-        description="Trading name of the business"
-    )
-    business_type: str = Field(
-        ..., min_length=1, max_length=100,
-        description="e.g. d2c, saas, services, agency, other"
-    )
-    products: str = Field(
-        ..., min_length=1, max_length=1000,
-        description="Description of products / services sold"
-    )
-
-    # ── Step 2 – Revenue & Profit ─────────────────────────────────────────
-    aov: float = Field(
-        ..., gt=0,
-        description="Average Order Value (currency units)"
-    )
-    margin: float = Field(
-        ..., ge=0, le=100,
-        description="Gross margin percentage (0–100)"
-    )
-    marketing_spend: float = Field(
-        ..., ge=0,
-        description="Monthly marketing spend (currency units)"
-    )
-
-    # ── Step 3 – Customers & Retention ───────────────────────────────────
-    repeat_purchase_rate: float = Field(
-        ..., ge=0, le=100,
-        description="% of customers who have made more than one purchase"
-    )
-    cac: float = Field(
-        ..., ge=0,
-        description="Customer Acquisition Cost (currency units)"
-    )
-
-    # ── Step 4 – Marketing & Acquisition ─────────────────────────────────
-    channels: list[str] = Field(
-        ..., min_length=1,
-        description="Active marketing / sales channels"
-    )
-    conversion_rate: float = Field(
-        ..., ge=0, le=100,
-        description="Site / funnel conversion rate percentage (0–100)"
-    )
-
-    # ── Step 5 – Challenges ───────────────────────────────────────────────
-    biggest_challenge: str = Field(
-        ..., min_length=1, max_length=2000,
-        description="Free-text description of the primary growth obstacle"
-    )
-
-    # ── Optional extra context forwarded to the LLM ─────────────────────
-    additional_inputs: AdditionalInputs = Field(
-        default_factory=AdditionalInputs,
-        description=(
-            "Optional typed context forwarded to the LLM: focus_areas, ltv, "
-            "contribution_margin, revenue_monthly. Unknown keys are silently dropped."
-        ),
-    )
-
-    # ── Validators ────────────────────────────────────────────────────────
+    user_id: Optional[int] = Field(default=None, ge=1)
+    email: Optional[str] = Field(default=None, max_length=255)
+    business_name: str = Field(..., min_length=1, max_length=255)
+    business_type: str = Field(..., min_length=1, max_length=100)
+    products: str = Field(..., min_length=1, max_length=1000)
+    aov: float = Field(..., gt=0)
+    margin: float = Field(..., ge=0, le=100)
+    marketing_spend: float = Field(..., ge=0)
+    repeat_purchase_rate: float = Field(..., ge=0, le=100)
+    cac: float = Field(..., ge=0)
+    channels: list[str] = Field(..., min_length=1)
+    conversion_rate: float = Field(..., ge=0, le=100)
+    biggest_challenge: str = Field(..., min_length=1, max_length=2000)
+    additional_inputs: AdditionalInputs = Field(default_factory=AdditionalInputs)
 
     @field_validator("channels", mode="before")
     @classmethod
     def coerce_channels(cls, v: Any) -> list[str]:
-        """Accept either a JSON array or a comma-separated string."""
         if isinstance(v, list):
             cleaned = [str(c).strip() for c in v if str(c).strip()]
             if not cleaned:
@@ -210,20 +88,14 @@ class DiagnosticRequest(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def coerce_additional_inputs(cls, values: Any) -> Any:
-        """
-        If the frontend sends additional_inputs as a plain dict (legacy clients),
-        pass it straight through — Pydantic will coerce it into AdditionalInputs.
-        If it is missing or None, substitute an empty dict so AdditionalInputs
-        can apply its own defaults.
-        """
-        if isinstance(values, dict):
-            if values.get("additional_inputs") is None:
-                values["additional_inputs"] = {}
+        if isinstance(values, dict) and values.get("additional_inputs") is None:
+            values["additional_inputs"] = {}
         return values
 
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
+                "email": "founder@example.com",
                 "business_name": "Bloom Skincare",
                 "business_type": "d2c",
                 "products": "Natural skincare serums and moisturisers",
@@ -240,63 +112,39 @@ class DiagnosticRequest(BaseModel):
                     "ltv": 3800,
                     "contribution_margin": 38,
                     "revenue_monthly": 450000,
+                    "orders": 950,
+                    "customers": 610,
+                    "snapshot_date": "2026-03-24",
+                    "cac_by_channel": {"Meta": 920, "Google": 770},
                 },
             }
         }
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Response
-# ─────────────────────────────────────────────────────────────────────────────
-
 class DiagnosticResponse(BaseModel):
-    """
-    Full structured response returned to the frontend after a successful submit.
-
-    The frontend DiagnosticResults component consumes:
-      health_score, insights, recommendations
-    """
-
-    # ── Identifiers ───────────────────────────────────────────────────────
-    diagnostic_id: int = Field(..., description="PK of the Diagnostic DB row")
-    report_id: int = Field(..., description="PK of the Report DB row")
-
-    # ── Status ────────────────────────────────────────────────────────────
-    status: str = Field(..., description="Always 'submitted' on success")
-    message: str = Field(..., description="Human-readable status message")
-
-    # ── Structured report ─────────────────────────────────────────────────
-    health_score: int = Field(
-        ..., ge=0, le=100,
-        description="Overall business health score (0 = critical, 100 = excellent)"
-    )
-    insights: list[Insight] = Field(
-        ..., description="4-6 data-driven insights covering key business dimensions"
-    )
-    recommendations: list[Recommendation] = Field(
-        ..., description="3-6 prioritised, actionable recommendations"
-    )
-
-    # ── Raw LLM output (kept for debugging / audit) ───────────────────────
-    llm_response: str = Field(
-        ..., description="Raw JSON string returned by the LLM service"
-    )
+    diagnostic_id: int
+    report_id: int
+    business_id: int
+    user_id: Optional[int] = None
+    status: str
+    message: str
+    health_score: int = Field(..., ge=0, le=100)
+    insights: list[Insight]
+    recommendations: list[Recommendation]
+    llm_response: str
 
     model_config = ConfigDict(from_attributes=True)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Lightweight read models (used by GET /diagnostic/{id})
-# ─────────────────────────────────────────────────────────────────────────────
-
 class DiagnosticSummary(BaseModel):
-    """Thin read model returned by GET /diagnostic/{id}."""
-
     diagnostic_id: int
+    report_id: Optional[int] = None
+    business_id: int
+    user_id: Optional[int] = None
     business_name: str
     business_type: str
     health_score: Optional[int] = None
-    created_at: str  # ISO-8601 string
+    created_at: str
 
     model_config = ConfigDict(from_attributes=True)
